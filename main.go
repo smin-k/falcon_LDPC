@@ -3,14 +3,14 @@ package main
 import (
 	"fmt"
 	"os/exec"
-	"test/ldpcDecoding"
-	"test/vct"
+	"falcon_vct/ldpcDecoding"
+	"falcon_vct/vct"
 )
 
 func main() {
 	const number_of_test_nodes int = 100
 	var message string = "PREVIOUS BLOCK HEADER"
-	var vct_or_not = 0
+	var vct_or_not = 1
 
 	if vct_or_not == 1 {
 		var probability uint8 = 10
@@ -18,7 +18,7 @@ func main() {
 		var temp_for_prob = 0
 
 		for i := 0; i < 1000; i++ {
-			winVCT, avgTime := vct.VCTtest(number_of_test_nodes, message, probability, false)
+			winVCT, avgTime := vct.VCTtest(number_of_test_nodes, message, probability, true)
 			fmt.Println("nodes who passed VCT : ", winVCT)
 			fmt.Println("average execute time : ", avgTime)
 			fmt.Printf("percentage : %.1f %%\n\n", (float32(len(winVCT))/float32(number_of_test_nodes))*100)
