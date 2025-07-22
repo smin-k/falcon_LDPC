@@ -1280,10 +1280,19 @@ Zf(gaussian0_sampler)(prng *p)
 		cc = (v2 - w2 - cc) >> 31;
 		z += (int)cc;
 	}
-	return z;
-
 #endif // yyyAVX2-
+
+    /*
+     * NewBaseSampler logic: reject 0 with 50% probability to shift
+     * the center from 0 to 0.5.
+     */
+    if (z == 0 && (prng_get_u8(p) & 1) == 0) {
+        return Zf(new_gaussian0_sampler)(p);
+    }
+    return z;
 }
+
+
 
 /*
  * Sample a bit with probability exp(-x) for some x >= 0.
@@ -1436,6 +1445,96 @@ Zf(sampler)(void *ctx, fpr mu, fpr isigma)
 			return s + z;
 		}
 	}
+}
+
+/*
+ * Sample an integer value along a half-gaussian distribution centered
+ * on 0.5 and standard deviation 1.8205, with a precision of 72 bits.
+ * This is the NewBaseSampler from the "Remedying the floating-point
+ * error sensitivity" paper. It is implemented by taking the existing
+ * gaussian0_sampler and rejecting 0 with 50% probability.
+ */
+TARGET_AVX2
+static int
+Zf(new_gaussian0_sampler)(prng *p)
+{
+    int z;
+
+    for (;;) {
+        z = Zf(gaussian0_sampler)(p);
+        if (z == 0 && (prng_get_u8(p) & 1) == 0) {
+            continue;
+        }
+        return z;
+    }
+}
+
+/*
+ * New sampler (NewSamplerZ) from the "Remedying the floating-point
+ * error sensitivity" paper. This sampler is stable away from
+ * half-integer centers.
+ */
+TARGET_AVX2
+int
+Zf(newsampler)(void *ctx, fpr mu, fpr isigma)
+{
+    sampler_context *spc;
+    int s, y, b;
+    fpr r, x, dss, ccs;
+
+    spc = ctx;
+
+    /*
+     * 1. r ← c − ⌊c⌉
+     * (center mu = c)
+     */
+    s = (int)fpr_round(mu);
+    r = fpr_sub(mu, fpr_of(s));
+
+    dss = fpr_half(fpr_sqr(isigma));
+    ccs = fpr_mul(isigma, spc->sigma_min);
+
+    for (;;) {
+        int y_plus;
+
+        /*
+         * 2. y+ ← NewBaseSampler()
+         */
+        y_plus = Zf(new_gaussian0_sampler)(&spc->p);
+
+        /*
+         * 3. b <-$ {0, 1}
+         */
+        b = (int)prng_get_u8(&spc->p) & 1;
+
+        /*
+         * 4. y ← (2b − 1)y+
+         */
+        y = (b << 1) - 1;
+        if (y < 0) {
+            y *= -y_plus;
+        } else {
+            y *= y_plus;
+        }
+
+        /*
+         * 5. x ← ((y−r)^2)/(2σ^2) − (y+^2−y+)/(2σ_max^2)
+         * The second term in the paper's formula contains a typo;
+         * it should be (y+^2 - y+). The existing Falcon implementation
+         * uses sigma0 for sigma_max.
+         */
+        x = fpr_mul(fpr_sqr(fpr_sub(fpr_of(y), r)), dss);
+        x = fpr_sub(x, fpr_mul(
+            fpr_sub(fpr_sqr(fpr_of(y_plus)), fpr_of(y_plus)),
+            fpr_inv_2sqrsigma0));
+
+        /*
+         * 6. return z ← y + ⌊c⌉ with probability (σ_min/σ)·exp(−x)
+         */
+        if (BerExp(&spc->p, x, ccs)) {
+            return s + y;
+        }
+    }
 }
 
 /* see inner.h */

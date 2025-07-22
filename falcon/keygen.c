@@ -4131,6 +4131,42 @@ poly_small_mkgauss(RNG_CONTEXT *rng, int8_t *f, unsigned logn)
 	}
 }
 
+/*  제안 이름: poly_small_mkgauss_parity()
+ *  - parity = -1  :  계수합 홀짝 무관 (그냥 가우스)
+ *  - parity =  0  :  계수합이 반드시 짝수
+ *  - parity =  1  :  계수합이 반드시 홀수
+ *
+ *  기존 poly_small_mkgauss() 를 래핑해 구현이 간단하고,
+ *  원하는 정책을 keygen 쪽에서 쉽게 선택할 수 있다.
+ */
+
+static void
+poly_small_mkgauss_choose(RNG_CONTEXT *rng,
+                          int8_t *f, unsigned logn, int want_parity) // want_parity = 0/1
+{
+    size_t n = MKN(logn);
+    unsigned mod2 = 0;
+
+    for (size_t u = 0; u < n; u++) {
+        int s;
+    restart:
+        s = mkgauss(rng, logn);
+        if (s < -127 || s > 127) goto restart;
+
+        if (u == n - 1) {
+            /* 이제 전체 합 parity 가 want_parity 여야 함 */
+            if ( ((mod2 ^ (unsigned)(s & 1)) != (unsigned)want_parity) ) {
+                goto restart;
+            }
+        } else {
+            mod2 ^= (unsigned)(s & 1);
+        }
+        f[u] = (int8_t)s;
+    }
+}
+
+
+
 /* see falcon.h */
 void
 Zf(keygen)(inner_shake256_context *rng,
@@ -4204,6 +4240,182 @@ Zf(keygen)(inner_shake256_context *rng,
 		 */
 		poly_small_mkgauss(rc, f, logn);
 		poly_small_mkgauss(rc, g, logn);
+
+		/*
+		 * Verify that all coefficients are within the bounds
+		 * defined in max_fg_bits. This is the case with
+		 * overwhelming probability; this guarantees that the
+		 * key will be encodable with FALCON_COMP_TRIM.
+		 */
+		lim = 1 << (Zf(max_fg_bits)[logn] - 1);
+		for (u = 0; u < n; u ++) {
+			/*
+			 * We can use non-CT tests since on any failure
+			 * we will discard f and g.
+			 */
+			if (f[u] >= lim || f[u] <= -lim
+				|| g[u] >= lim || g[u] <= -lim)
+			{
+				lim = -1;
+				break;
+			}
+		}
+		if (lim < 0) {
+			continue;
+		}
+
+		/*
+		 * Bound is 1.17*sqrt(q). We compute the squared
+		 * norms. With q = 12289, the squared bound is:
+		 *   (1.17^2)* 12289 = 16822.4121
+		 * Since f and g are integral, the squared norm
+		 * of (g,-f) is an integer.
+		 */
+		normf = poly_small_sqnorm(f, logn);
+		normg = poly_small_sqnorm(g, logn);
+		norm = (normf + normg) | -((normf | normg) >> 31);
+		if (norm >= 16823) {
+			continue;
+		}
+
+		/*
+		 * We compute the orthogonalized vector norm.
+		 */
+		rt1 = (fpr *)tmp;
+		rt2 = rt1 + n;
+		rt3 = rt2 + n;
+		poly_small_to_fp(rt1, f, logn);
+		poly_small_to_fp(rt2, g, logn);
+		Zf(FFT)(rt1, logn);
+		Zf(FFT)(rt2, logn);
+		Zf(poly_invnorm2_fft)(rt3, rt1, rt2, logn);
+		Zf(poly_adj_fft)(rt1, logn);
+		Zf(poly_adj_fft)(rt2, logn);
+		Zf(poly_mulconst)(rt1, fpr_q, logn);
+		Zf(poly_mulconst)(rt2, fpr_q, logn);
+		Zf(poly_mul_autoadj_fft)(rt1, rt3, logn);
+		Zf(poly_mul_autoadj_fft)(rt2, rt3, logn);
+		Zf(iFFT)(rt1, logn);
+		Zf(iFFT)(rt2, logn);
+		bnorm = fpr_zero;
+		for (u = 0; u < n; u ++) {
+			bnorm = fpr_add(bnorm, fpr_sqr(rt1[u]));
+			bnorm = fpr_add(bnorm, fpr_sqr(rt2[u]));
+		}
+		if (!fpr_lt(bnorm, fpr_bnorm_max)) {
+			continue;
+		}
+
+		/*
+		 * Compute public key h = g/f mod X^N+1 mod q. If this
+		 * fails, we must restart.
+		 */
+		if (h == NULL) {
+			h2 = (uint16_t *)tmp;
+			tmp2 = h2 + n;
+		} else {
+			h2 = h;
+			tmp2 = (uint16_t *)tmp;
+		}
+		if (!Zf(compute_public)(h2, f, g, logn, (uint8_t *)tmp2)) {
+			continue;
+		}
+
+		/*
+		 * Solve the NTRU equation to get F and G.
+		 */
+		lim = (1 << (Zf(max_FG_bits)[logn] - 1)) - 1;
+		if (!solve_NTRU(logn, F, G, f, g, lim, (uint32_t *)tmp)) {
+			continue;
+		}
+
+		/*
+		 * Key pair is generated.
+		 */
+		break;
+	}
+}
+
+/* see falcon.h */
+void
+Zf(new_keygen)(inner_shake256_context *rng,
+	int8_t *f, int8_t *g, int8_t *F, int8_t *G, uint16_t *h,
+	unsigned logn, uint8_t *tmp)
+{
+	/*
+	 * Algorithm is the following:
+	 *
+	 *  - Generate f and g with the Gaussian distribution.
+	 *
+	 *  - If either Res(f,phi) or Res(g,phi) is even, try again.
+	 *
+	 *  - If ||(f,g)|| is too large, try again.
+	 *
+	 *  - If ||B~_{f,g}|| is too large, try again.
+	 *
+	 *  - If f is not invertible mod phi mod q, try again.
+	 *
+	 *  - Compute h = g/f mod phi mod q.
+	 *
+	 *  - Solve the NTRU equation fG - gF = q; if the solving fails,
+	 *    try again. Usual failure condition is when Res(f,phi)
+	 *    and Res(g,phi) are not prime to each other.
+	 */
+	size_t n, u;
+	uint16_t *h2, *tmp2;
+	RNG_CONTEXT *rc;
+#if FALCON_KG_CHACHA20  // yyyKG_CHACHA20+1
+	prng p;
+#endif  // yyyKG_CHACHA20-
+
+	n = MKN(logn);
+#if FALCON_KG_CHACHA20  // yyyKG_CHACHA20+1
+	Zf(prng_init)(&p, rng);
+	rc = &p;
+#else // yyyKG_CHACHA20+0
+	rc = rng;
+#endif  // yyyKG_CHACHA20-
+
+	/*
+	 * We need to generate f and g randomly, until we find values
+	 * such that the norm of (g,-f), and of the orthogonalized
+	 * vector, are satisfying. The orthogonalized vector is:
+	 *   (q*adj(f)/(f*adj(f)+g*adj(g)), q*adj(g)/(f*adj(f)+g*adj(g)))
+	 * (it is actually the (N+1)-th row of the Gram-Schmidt basis).
+	 *
+	 * In the binary case, coefficients of f and g are generated
+	 * independently of each other, with a discrete Gaussian
+	 * distribution of standard deviation 1.17*sqrt(q/(2*N)). Then,
+	 * the two vectors have expected norm 1.17*sqrt(q), which is
+	 * also our acceptance bound: we require both vectors to be no
+	 * larger than that (this will be satisfied about 1/4th of the
+	 * time, thus we expect sampling new (f,g) about 4 times for that
+	 * step).
+	 *
+	 * We require that Res(f,phi) and Res(g,phi) are both odd (the
+	 * NTRU equation solver requires it).
+	 */
+	for (;;) {
+		fpr *rt1, *rt2, *rt3;
+		fpr bnorm;
+		uint32_t normf, normg, norm;
+		int lim;
+
+		/*
+		 * The poly_small_mkgauss() function makes sure
+		 * that the sum of coefficients is 1 modulo 2
+		 * (i.e. the resultant of the polynomial with phi
+		 * will be odd).
+		 */
+		/* 1) 무작위로 f 의 parity 선택 (0 = 짝수, 1 = 홀수) */
+		int pf = prng_get_u8(rc) & 1;   /* 라운드마다 바뀜: 0 또는 1 */
+
+		/* 2) g 는 반대 parity 로 강제 */
+		int pg = pf ^ 1;                /* 0 ↔ 1 서로 반대 */
+
+		/* 3) 샘플링 */
+		poly_small_mkgauss_choose(rc, f, logn, pf);
+		poly_small_mkgauss_choose(rc, g, logn, pg);
 
 		/*
 		 * Verify that all coefficients are within the bounds
