@@ -423,7 +423,8 @@ ffSampling_fft_dyntree(samplerZ samp, void *samp_ctx,
  */
 TARGET_AVX2
 static void
-ffSampling_fft(samplerZ samp, void *samp_ctx,
+
+(samplerZ samp, void *samp_ctx,
 	fpr *restrict z0, fpr *restrict z1,
 	const fpr *restrict tree,
 	const fpr *restrict t0, const fpr *restrict t1, unsigned logn,
@@ -573,8 +574,11 @@ ffSampling_fft(samplerZ samp, void *samp_ctx,
 		w1 = fpr_half(c_im);
 		c_re = fpr_sub(a_re, b_re);
 		c_im = fpr_sub(a_im, b_im);
-		w2 = fpr_mul(fpr_add(c_re, c_im), fpr_invsqrt8);
-		w3 = fpr_mul(fpr_sub(c_im, c_re), fpr_invsqrt8);
+		// w2 = fpr_mul(fpr_add(c_re, c_im), fpr_invsqrt8);
+		// w3 = fpr_mul(fpr_sub(c_im, c_re), fpr_invsqrt8);
+		w2 = fpr_half(fpr_sub(fpr_mul(c_re, fpr_invsqrt2), fpr_mul(c_im, fpr_neg(fpr_invsqrt2))));
+ 		w3 = fpr_half(fpr_add(fpr_mul(c_re, fpr_neg(fpr_invsqrt2)), fpr_mul(c_im, fpr_invsqrt2)));
+
 
 		x0 = w2;
 		x1 = w3;
@@ -597,8 +601,10 @@ ffSampling_fft(samplerZ samp, void *samp_ctx,
 		a_im = w1;
 		b_re = w2;
 		b_im = w3;
-		c_re = fpr_mul(fpr_sub(b_re, b_im), fpr_invsqrt2);
-		c_im = fpr_mul(fpr_add(b_re, b_im), fpr_invsqrt2);
+		// c_re = fpr_mul(fpr_sub(b_re, b_im), fpr_invsqrt2);
+		// c_im = fpr_mul(fpr_add(b_re, b_im), fpr_invsqrt2);
+		c_re = fpr_sub(fpr_mul(b_re, fpr_invsqrt2), fpr_mul(b_im, fpr_invsqrt2));
+ 		c_im = fpr_add(fpr_mul(b_re, fpr_invsqrt2), fpr_mul(b_im, fpr_invsqrt2));
 		z1[0] = w0 = fpr_add(a_re, c_re);
 		z1[2] = w2 = fpr_add(a_im, c_im);
 		z1[1] = w1 = fpr_sub(a_re, c_re);
@@ -1613,6 +1619,95 @@ Zf(sign_dyn)(int16_t *sig, inner_shake256_context *rng,
 		spc.sigma_min = fpr_sigma_min[logn];
 		Zf(prng_init)(&spc.p, rng);
 		samp = Zf(sampler);
+		samp_ctx = &spc;
+
+		/*
+		 * Do the actual signature.
+		 */
+		if (do_sign_dyn(samp, samp_ctx, sig,
+			f, g, F, G, hm, logn, ftmp))
+		{
+			break;
+		}
+	}
+}
+
+/* see inner.h */
+void
+Zf(new_sign_tree)(int16_t *sig, inner_shake256_context *rng,
+	const fpr *restrict expanded_key,
+	const uint16_t *hm, unsigned logn, uint8_t *tmp)
+{
+	fpr *ftmp;
+
+	ftmp = (fpr *)tmp;
+	for (;;) {
+		/*
+		 * Signature produces short vectors s1 and s2. The
+		 * signature is acceptable only if the aggregate vector
+		 * s1,s2 is short; we must use the same bound as the
+		 * verifier.
+		 *
+		 * If the signature is acceptable, then we return only s2
+		 * (the verifier recomputes s1 from s2, the hashed message,
+		 * and the public key).
+		 */
+		sampler_context spc;
+		samplerZ samp;
+		void *samp_ctx;
+
+		/*
+		 * Normal sampling. We use a fast PRNG seeded from our
+		 * SHAKE context ('rng').
+		 */
+		spc.sigma_min = fpr_sigma_min[logn];
+		Zf(prng_init)(&spc.p, rng);
+		samp = Zf(new_sampler);
+		samp_ctx = &spc;
+
+		/*
+		 * Do the actual signature.
+		 */
+		if (do_sign_tree(samp, samp_ctx, sig,
+			expanded_key, hm, logn, ftmp))
+		{
+			break;
+		}
+	}
+}
+
+/* see inner.h */
+void
+Zf(new_sign_dyn)(int16_t *sig, inner_shake256_context *rng,
+	const int8_t *restrict f, const int8_t *restrict g,
+	const int8_t *restrict F, const int8_t *restrict G,
+	const uint16_t *hm, unsigned logn, uint8_t *tmp)
+{
+	fpr *ftmp;
+
+	ftmp = (fpr *)tmp;
+	for (;;) {
+		/*
+		 * Signature produces short vectors s1 and s2. The
+		 * signature is acceptable only if the aggregate vector
+		 * s1,s2 is short; we must use the same bound as the
+		 * verifier.
+		 *
+		 * If the signature is acceptable, then we return only s2
+		 * (the verifier recomputes s1 from s2, the hashed message,
+		 * and the public key).
+		 */
+		sampler_context spc;
+		samplerZ samp;
+		void *samp_ctx;
+
+		/*
+		 * Normal sampling. We use a fast PRNG seeded from our
+		 * SHAKE context ('rng').
+		 */
+		spc.sigma_min = fpr_sigma_min[logn];
+		Zf(prng_init)(&spc.p, rng);
+		samp = Zf(new_sampler);
 		samp_ctx = &spc;
 
 		/*

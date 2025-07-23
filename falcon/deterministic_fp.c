@@ -3,7 +3,7 @@
 
 #include "falcon.h"
 #include "inner.h"
-#include "deterministic.h"
+#include "deterministic_fp.h"
 
 #define FALCON_DET1024_TMPSIZE_KEYGEN FALCON_TMPSIZE_KEYGEN(FALCON_DET1024_LOGN)
 #define FALCON_DET1024_TMPSIZE_SIGNDYN FALCON_TMPSIZE_SIGNDYN(FALCON_DET1024_LOGN)
@@ -15,7 +15,7 @@
 int falcon_det1024_keygen(shake256_context *rng, void *privkey, void *pubkey) {
 	uint8_t tmpkg[FALCON_DET1024_TMPSIZE_KEYGEN];
 
-	return falcon_keygen_make(rng, FALCON_DET1024_LOGN,
+	return new_falcon_keygen_make(rng, FALCON_DET1024_LOGN,
 		privkey, FALCON_DET1024_PRIVKEY_SIZE,
 		pubkey, FALCON_DET1024_PUBKEY_SIZE,
 		tmpkg, FALCON_DET1024_TMPSIZE_KEYGEN);
