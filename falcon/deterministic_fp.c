@@ -15,7 +15,7 @@
 int falcon_det1024_keygen(shake256_context *rng, void *privkey, void *pubkey) {
 	uint8_t tmpkg[FALCON_DET1024_TMPSIZE_KEYGEN];
 
-	return new_falcon_keygen_make(rng, FALCON_DET1024_LOGN,
+	return falcon_keygen_make(rng, FALCON_DET1024_LOGN,
 		privkey, FALCON_DET1024_PRIVKEY_SIZE,
 		pubkey, FALCON_DET1024_PUBKEY_SIZE,
 		tmpkg, FALCON_DET1024_TMPSIZE_KEYGEN);
