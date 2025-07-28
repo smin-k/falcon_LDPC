@@ -53,18 +53,18 @@ func testKAT(t *testing.T, msgLen int) {
 	fmt.Fprintf(msgrng, "msg-%04d", msgLen)
 	msg := make([]byte, msgLen)
 	msgrng.Read(msg)
-
+	t.Logf("start")
 	keySeed := fmt.Sprintf("key-%04d", msgLen)
 	_, priv, err := GenerateKey([]byte(keySeed))
 	if err != nil {
 		t.Fatalf("failed to generate keys. err message: %s", err)
 	}
-
+	t.Logf("start2")
 	sig, err := priv.SignCompressed(msg)
 	if err != nil {
 		t.Fatalf("failed to sign keys. err message: %s", err)
 	}
-
+		t.Logf("start3")
 	if s := hex.EncodeToString(sig); s != kats[msgLen] {
 		t.Fatalf("kat %d: got %s, want %s", msgLen, s, kats[msgLen])
 	}

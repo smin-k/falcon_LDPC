@@ -4408,14 +4408,18 @@ Zf(keygen)(inner_shake256_context *rng,
 		 * will be odd).
 		 */
 		/* 1) 무작위로 f 의 parity 선택 (0 = 짝수, 1 = 홀수) */
-		int pf = prng_get_u8(rc) & 1;   /* 라운드마다 바뀜: 0 또는 1 */
-
+		uint8_t b;
+		inner_shake256_extract(rc, &b, 1);  // rc: inner_shake256_context*
+		int pf = b & 1;                     // 0 또는 1
 		/* 2) g 는 반대 parity 로 강제 */
 		int pg = pf ^ 1;                /* 0 ↔ 1 서로 반대 */
 
 		/* 3) 샘플링 */
-		poly_small_mkgauss_choose(rc, f, logn, pf);
-		poly_small_mkgauss_choose(rc, g, logn, pg);
+		// poly_small_mkgauss_choose(rc, f, logn, pf);
+		// poly_small_mkgauss_choose(rc, g, logn, pg);
+		poly_small_mkgauss_choose(rc, f, logn, 1);
+		poly_small_mkgauss_choose(rc, g, logn, 1);
+
 
 		/*
 		 * Verify that all coefficients are within the bounds

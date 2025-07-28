@@ -423,8 +423,7 @@ ffSampling_fft_dyntree(samplerZ samp, void *samp_ctx,
  */
 TARGET_AVX2
 static void
-
-(samplerZ samp, void *samp_ctx,
+ffSampling_fft(samplerZ samp, void *samp_ctx,
 	fpr *restrict z0, fpr *restrict z1,
 	const fpr *restrict tree,
 	const fpr *restrict t0, const fpr *restrict t1, unsigned logn,
@@ -1292,9 +1291,9 @@ Zf(gaussian0_sampler)(prng *p)
      * NewBaseSampler logic: reject 0 with 50% probability to shift
      * the center from 0 to 0.5.
      */
-    if (z == 0 && (prng_get_u8(p) & 1) == 0) {
-        return Zf(gaussian0_sampler)(p);
-    }
+    // if (z == 0 && (prng_get_u8(p) & 1) == 0) {
+    //     return Zf(gaussian0_sampler)(p);
+    // }
     return z;
 }
 
@@ -1470,7 +1469,7 @@ Zf(sampler)(void *ctx, fpr mu, fpr isigma)
      * 1. r ← c − ⌊c⌉
      * (center mu = c)
      */
-    s = (int)fpr_round(mu);
+    s = (int)fpr_rint(mu);
     r = fpr_sub(mu, fpr_of(s));
 
     dss = fpr_half(fpr_sqr(isigma));
