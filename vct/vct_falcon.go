@@ -1,12 +1,11 @@
 package vct
 
 import (
-    "crypto/rand"
-    "encoding/hex"
-    "falcon_vct/falcon"
-    "fmt"
-    mathrand "math/rand"
-    "time"
+	"crypto/rand"
+	"encoding/hex"
+	"falcon_vct/falcon"
+	"fmt"
+	"time"
 )
 
 const log1024 uint = 10
@@ -16,7 +15,6 @@ type set_probablity struct {
     norm_bound uint32
 }
 
-// Percentage expected to pass the VCT / norm bound
 var Prob = []set_probablity{
     {5, 55085531},  // ~5%
     {10, 55744816}, // ~10%
@@ -26,31 +24,27 @@ var Prob = []set_probablity{
     {30, 57118819}, // ~30%
 }
 
-// norm_s는 서명 (s1, s2)의 제곱 놈(squared norm)을 계산합니다.
-func norm_s(s1, s2 [1024]int16, logn uint) uint32 {
-    n := 1 << logn
-    s := uint32(0)
-
-    for u := 0; u < n; u++ {
-        var z int32
-
-        z = int32(s1[u])
-        s += uint32(z * z)
-
-        z = int32(s2[u])
-        s += uint32(z * z)
-    }
-
-    return s
+type Nodes struct {
+    id       string
+    pi       string
+    norm     int
+    VCT_res  bool
+    vrfy_res string
+    exe_time string
 }
 
-// PerformFalconVCT는 단일 Falcon VCT를 수행합니다.
-// 키 생성, 서명, 검증 및 놈(norm) 확인을 포함합니다.
-func PerformFalconVCT(id int, msg []byte, nthreshold uint32) Nodes {
+// 내부 공용 함수: seed가 nil이면 랜덤, 아니면 주어진 seed 사용
+func performFalconVCT(id int, msg []byte, nthreshold uint32, seed []byte) Nodes {
     startTime := time.Now()
-    mathrand.Seed(time.Now().UnixNano())
-    seed := make([]byte, 64)
-    rand.Read(seed)
+
+    // seed 없으면 랜덤 seed 생성 (기존 동작 유지)
+    if seed == nil || len(seed) == 0 {
+        seed = make([]byte, 64)
+        if _, err := rand.Read(seed); err != nil {
+            panic(err)
+        }
+    }
+
     pk, sk, _ := falcon.GenerateKey(seed)
 
     sig, _ := sk.SignCompressed(msg)
@@ -91,4 +85,47 @@ func PerformFalconVCT(id int, msg []byte, nthreshold uint32) Nodes {
         vrfy_res: verify_res,
         exe_time: elapsedTime.String(),
     }
+}
+
+func Prove(pk []byte, sk []byte, m []byte) (pi, hash []byte, err error) {
+
+    sig, _ := sk.SignCompressed(m)
+
+    
+
+    return sig, Hash(sig), nil
+}
+
+// Hash: pi에서 VRF output만 추출
+func Hash(pi []byte) []byte {
+	return pi[1 : N2+1] // 첫 바이트는 sign
+}
+
+// Verify: pi가 유효한지 확인
+func Verify(pk []byte, pi []byte, m []byte) (bool, error) {
+
+
+
+// 기존 공개 함수는 그대로 두고, 내부 공용 함수만 호출
+// => 외부 코드(main 등)는 수정할 필요 없음.
+func PerformFalconVCT(id int, msg []byte, nthreshold uint32) Nodes {
+    return performFalconVCT(id, msg, nthreshold, nil)
+}
+
+// norm_s는 기존 그대로 두면 됨
+func norm_s(s1, s2 [1024]int16, logn uint) uint32 {
+    n := 1 << logn
+    s := uint32(0)
+
+    for u := 0; u < n; u++ {
+        var z int32
+
+        z = int32(s1[u])
+        s += uint32(z * z)
+
+        z = int32(s2[u])
+        s += uint32(z * z)
+    }
+
+    return s
 }

@@ -1,10 +1,10 @@
 package main
 
 import (
+	"falcon_vct/eccpow"
+	"falcon_vct/vct"
 	"fmt"
 	"os/exec"
-	"falcon_vct/ldpcDecoding"
-	"falcon_vct/vct"
 )
 
 func main() {

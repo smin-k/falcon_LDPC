@@ -1071,7 +1071,7 @@ void Zf(keygen)(inner_shake256_context *rng,
 	int8_t *f, int8_t *g, int8_t *F, int8_t *G, uint16_t *h,
 	unsigned logn, uint8_t *tmp);
 
-void Zf(newkeygen)(inner_shake256_context *rng,
+void Zf(new_keygen)(inner_shake256_context *rng,
 	int8_t *f, int8_t *g, int8_t *F, int8_t *G, uint16_t *h,
 	unsigned logn, uint8_t *tmp);
 

@@ -2,9 +2,9 @@ package vct
 
 import (
 	"fmt"
-	"time"
 	"reflect"
 	"testing"
+	"time"
 )
 
 type Nodes struct {
