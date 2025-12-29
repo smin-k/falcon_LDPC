@@ -1156,11 +1156,16 @@ typedef struct {
 } sampler_context;
 
 TARGET_AVX2
+int Zf(new_sampler)(void *ctx, fpr mu, fpr isigma);
+
+TARGET_AVX2
 int Zf(sampler)(void *ctx, fpr mu, fpr isigma);
 
 TARGET_AVX2
 int Zf(gaussian0_sampler)(prng *p);
 
+TARGET_AVX2
+int Zf(new_gaussian0_sampler)(prng *p);
 /*
  * Compute NTT on a ring element.
  */

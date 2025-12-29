@@ -604,6 +604,7 @@ ffSampling_fft(samplerZ samp, void *samp_ctx,
 		// c_im = fpr_mul(fpr_add(b_re, b_im), fpr_invsqrt2);
 		c_re = fpr_sub(fpr_mul(b_re, fpr_invsqrt2), fpr_mul(b_im, fpr_invsqrt2));
  		c_im = fpr_add(fpr_mul(b_re, fpr_invsqrt2), fpr_mul(b_im, fpr_invsqrt2));
+
 		z1[0] = w0 = fpr_add(a_re, c_re);
 		z1[2] = w2 = fpr_add(a_im, c_im);
 		z1[1] = w1 = fpr_sub(a_re, c_re);
@@ -1286,16 +1287,30 @@ Zf(gaussian0_sampler)(prng *p)
 		z += (int)cc;
 	}
 #endif // yyyAVX2-
-
-    /*
-     * NewBaseSampler logic: reject 0 with 50% probability to shift
-     * the center from 0 to 0.5.
-     */
-    // if (z == 0 && (prng_get_u8(p) & 1) == 0) {
-    //     return Zf(gaussian0_sampler)(p);
-    // }
     return z;
 }
+
+/* NewBaseSampler: 0을 50% 확률로 reject해서 center를 약간 오른쪽으로 밀기 */
+TARGET_AVX2
+int
+Zf(new_gaussian0_sampler)(prng *p)
+{
+    for (;;) {
+        int z = Zf(gaussian0_sampler)(p);
+
+        if (z != 0) {
+            /* 0이 아니면 무조건 accept */
+            return z;
+        }
+
+        /* z == 0인 경우: 50% 확률로 accept, 50%는 재시작 */
+        if (prng_get_u8(p) & 1) {
+            return 0;
+        }
+        /* else: loop 다시 → 전체 분포에서 재샘플 */
+    }
+}
+
 
 /*
  * Sample a bit with probability exp(-x) for some x >= 0.
@@ -1356,256 +1371,199 @@ BerExp(prng *p, fpr x, fpr ccs)
 	return (int)(w >> 31);
 }
 
-// /*
-//  * The sampler produces a random integer that follows a discrete Gaussian
-//  * distribution, centered on mu, and with standard deviation sigma. The
-//  * provided parameter isigma is equal to 1/sigma.
-//  *
-//  * The value of sigma MUST lie between 1 and 2 (i.e. isigma lies between
-//  * 0.5 and 1); in Falcon, sigma should always be between 1.2 and 1.9.
-//  */
-// TARGET_AVX2
-// int
-// Zf(sampler)(void *ctx, fpr mu, fpr isigma)
-// {
-// 	sampler_context *spc;
-// 	int s;
-// 	fpr r, dss, ccs;
-
-// 	spc = ctx;
-
-// 	/*
-// 	 * Center is mu. We compute mu = s + r where s is an integer
-// 	 * and 0 <= r < 1.
-// 	 */
-// 	s = (int)fpr_floor(mu);
-// 	r = fpr_sub(mu, fpr_of(s));
-
-// 	/*
-// 	 * dss = 1/(2*sigma^2) = 0.5*(isigma^2).
-// 	 */
-// 	dss = fpr_half(fpr_sqr(isigma));
-
-// 	/*
-// 	 * ccs = sigma_min / sigma = sigma_min * isigma.
-// 	 */
-// 	ccs = fpr_mul(isigma, spc->sigma_min);
-
-// 	/*
-// 	 * We now need to sample on center r.
-// 	 */
-// 	for (;;) {
-// 		int z0, z, b;
-// 		fpr x;
-
-// 		/*
-// 		 * Sample z for a Gaussian distribution. Then get a
-// 		 * random bit b to turn the sampling into a bimodal
-// 		 * distribution: if b = 1, we use z+1, otherwise we
-// 		 * use -z. We thus have two situations:
-// 		 *
-// 		 *  - b = 1: z >= 1 and sampled against a Gaussian
-// 		 *    centered on 1.
-// 		 *  - b = 0: z <= 0 and sampled against a Gaussian
-// 		 *    centered on 0.
-// 		 */
-// 		z0 = Zf(gaussian0_sampler)(&spc->p);
-// 		b = (int)prng_get_u8(&spc->p) & 1;
-// 		z = b + ((b << 1) - 1) * z0;
-
-// 		/*
-// 		 * Rejection sampling. We want a Gaussian centered on r;
-// 		 * but we sampled against a Gaussian centered on b (0 or
-// 		 * 1). But we know that z is always in the range where
-// 		 * our sampling distribution is greater than the Gaussian
-// 		 * distribution, so rejection works.
-// 		 *
-// 		 * We got z with distribution:
-// 		 *    G(z) = exp(-((z-b)^2)/(2*sigma0^2))
-// 		 * We target distribution:
-// 		 *    S(z) = exp(-((z-r)^2)/(2*sigma^2))
-// 		 * Rejection sampling works by keeping the value z with
-// 		 * probability S(z)/G(z), and starting again otherwise.
-// 		 * This requires S(z) <= G(z), which is the case here.
-// 		 * Thus, we simply need to keep our z with probability:
-// 		 *    P = exp(-x)
-// 		 * where:
-// 		 *    x = ((z-r)^2)/(2*sigma^2) - ((z-b)^2)/(2*sigma0^2)
-// 		 *
-// 		 * Here, we scale up the Bernouilli distribution, which
-// 		 * makes rejection more probable, but makes rejection
-// 		 * rate sufficiently decorrelated from the Gaussian
-// 		 * center and standard deviation that the whole sampler
-// 		 * can be said to be constant-time.
-// 		 */
-// 		x = fpr_mul(fpr_sqr(fpr_sub(fpr_of(z), r)), dss);
-// 		x = fpr_sub(x, fpr_mul(fpr_of(z0 * z0), fpr_inv_2sqrsigma0));
-// 		if (BerExp(&spc->p, x, ccs)) {
-// 			/*
-// 			 * Rejection sampling was centered on r, but the
-// 			 * actual center is mu = s + r.
-// 			 */
-// 			return s + z;
-// 		}
-// 	}
-// }
-
 /*
- * New sampler (NewSamplerZ) from the "Remedying the floating-point
- * error sensitivity" paper. This sampler is stable away from
- * half-integer centers.
+ * The sampler produces a random integer that follows a discrete Gaussian
+ * distribution, centered on mu, and with standard deviation sigma. The
+ * provided parameter isigma is equal to 1/sigma.
+ *
+ * The value of sigma MUST lie between 1 and 2 (i.e. isigma lies between
+ * 0.5 and 1); in Falcon, sigma should always be between 1.2 and 1.9.
  */
 TARGET_AVX2
 int
 Zf(sampler)(void *ctx, fpr mu, fpr isigma)
 {
+	sampler_context *spc;
+	int s;
+	fpr r, dss, ccs;
+
+	spc = ctx;
+
+	/*
+	 * Center is mu. We compute mu = s + r where s is an integer
+	 * and 0 <= r < 1.
+	 */
+	s = (int)fpr_floor(mu);
+	r = fpr_sub(mu, fpr_of(s));
+
+	/*
+	 * dss = 1/(2*sigma^2) = 0.5*(isigma^2).
+	 */
+	dss = fpr_half(fpr_sqr(isigma));
+
+	/*
+	 * ccs = sigma_min / sigma = sigma_min * isigma.
+	 */
+	ccs = fpr_mul(isigma, spc->sigma_min);
+
+	/*
+	 * We now need to sample on center r.
+	 */
+	for (;;) {
+		int z0, z, b;
+		fpr x;
+
+		/*
+		 * Sample z for a Gaussian distribution. Then get a
+		 * random bit b to turn the sampling into a bimodal
+		 * distribution: if b = 1, we use z+1, otherwise we
+		 * use -z. We thus have two situations:
+		 *
+		 *  - b = 1: z >= 1 and sampled against a Gaussian
+		 *    centered on 1.
+		 *  - b = 0: z <= 0 and sampled against a Gaussian
+		 *    centered on 0.
+		 */
+		z0 = Zf(gaussian0_sampler)(&spc->p);
+		b = (int)prng_get_u8(&spc->p) & 1;
+		z = b + ((b << 1) - 1) * z0;
+
+		/*
+		 * Rejection sampling. We want a Gaussian centered on r;
+		 * but we sampled against a Gaussian centered on b (0 or
+		 * 1). But we know that z is always in the range where
+		 * our sampling distribution is greater than the Gaussian
+		 * distribution, so rejection works.
+		 *
+		 * We got z with distribution:
+		 *    G(z) = exp(-((z-b)^2)/(2*sigma0^2))
+		 * We target distribution:
+		 *    S(z) = exp(-((z-r)^2)/(2*sigma^2))
+		 * Rejection sampling works by keeping the value z with
+		 * probability S(z)/G(z), and starting again otherwise.
+		 * This requires S(z) <= G(z), which is the case here.
+		 * Thus, we simply need to keep our z with probability:
+		 *    P = exp(-x)
+		 * where:
+		 *    x = ((z-r)^2)/(2*sigma^2) - ((z-b)^2)/(2*sigma0^2)
+		 *
+		 * Here, we scale up the Bernouilli distribution, which
+		 * makes rejection more probable, but makes rejection
+		 * rate sufficiently decorrelated from the Gaussian
+		 * center and standard deviation that the whole sampler
+		 * can be said to be constant-time.
+		 */
+		x = fpr_mul(fpr_sqr(fpr_sub(fpr_of(z), r)), dss);
+		x = fpr_sub(x, fpr_mul(fpr_of(z0 * z0), fpr_inv_2sqrsigma0));
+		if (BerExp(&spc->p, x, ccs)) {
+			/*
+			 * Rejection sampling was centered on r, but the
+			 * actual center is mu = s + r.
+			 */
+			return s + z;
+		}
+	}
+}
+
+/*
+ * NewSamplerZ: numerically stable sampler using NewBaseSampler (new_gaussian0_sampler)
+ * and rounding-to-nearest center decomposition.
+ *
+ * On input mu (center) and isigma = 1/sigma with sigma ∈ [sigma_min, sigma_max],
+ * this samples from D_{Z, sigma, mu}.
+ */
+TARGET_AVX2
+int
+Zf(new_sampler)(void *ctx, fpr mu, fpr isigma)
+{
     sampler_context *spc;
-    int s, y, b;
-    fpr r, x, dss, ccs;
+    int s;
+    fpr r, dss, ccs;
 
     spc = ctx;
 
     /*
-     * 1. r ← c − ⌊c⌉
-     * (center mu = c)
+     * Center decomposition:
+     *   mu = s + r
+     * where s is an integer and r ∈ [-0.5, 0.5).
+     * This uses rounding-to-nearest instead of floor,
+     * as in Algorithm 4 (NewSamplerZ).
+     *
+     * If your fpr layer does not have fpr_rint(), you can emulate
+     * round-to-nearest as:
+     *   s = (int)fpr_floor(fpr_add(mu, fpr_half(fpr_one)));
      */
-    s = (int)fpr_rint(mu);
+    s = (int)fpr_rint(mu);  /* ⌊mu⌉ */
     r = fpr_sub(mu, fpr_of(s));
 
+    /*
+     * dss = 1/(2*sigma^2) = 0.5 * (isigma^2).
+     */
     dss = fpr_half(fpr_sqr(isigma));
+
+    /*
+     * ccs = sigma_min / sigma = sigma_min * isigma.
+     * (same as original sampler)
+     */
     ccs = fpr_mul(isigma, spc->sigma_min);
 
+    /*
+     * Main rejection-sampling loop.
+     */
     for (;;) {
-        int y_plus;
+        int yplus, y, b;
+        fpr x;
 
         /*
-         * 2. y+ ← NewBaseSampler()
+         * NewBaseSampler: yplus ≥ 0 with distribution D^+:
+         *   D^+(i) ∝ ρ_{σ_max, 1/2}(i) for i ≥ 1
+         *            1/2 ρ_{σ_max, 1/2}(0) for i = 0
+         *
+         * Implemented by new_gaussian0_sampler(), which is
+         * gaussian0_sampler + "reject 0 with prob 1/2" wrapper.
          */
-        y_plus = Zf(gaussian0_sampler)(&spc->p);
+        yplus = Zf(new_gaussian0_sampler)(&spc->p);
 
         /*
-         * 3. b <-$ {0, 1}
+         * Draw a random sign: b ∈ {0,1}, sgn ∈ {-1,+1}.
+         * y = (2b - 1) * yplus
+         *
+         * This yields y with distribution D_{Z, σ_max, 1/2}
+         * (Lemma 3 in the paper).
          */
         b = (int)prng_get_u8(&spc->p) & 1;
+        y = ((b << 1) - 1) * yplus;  /* b=0 → -yplus, b=1 → +yplus */
 
         /*
-         * 4. y ← (2b − 1)y+
-         */
-        y = (b << 1) - 1;
-        if (y < 0) {
-            y *= -y_plus;
-        } else {
-            y *= y_plus;
-        }
-
-        /*
-         * 5. x ← ((y−r)^2)/(2σ^2) − (y+^2−y+)/(2σ_max^2)
-         * The second term in the paper's formula contains a typo;
-         * it should be (y+^2 - y+). The existing Falcon implementation
-         * uses sigma0 for sigma_max.
+         * Rejection sampling:
+         *   Proposal G(y) = D_{Z, σ_max, 1/2}(y)
+         *   Target   S(y) = D_{Z, σ, r}(y)
+         *
+         * We keep y with probability:
+         *
+         *   P = (σ_min / σ) * exp(-x)
+         *
+         * where:
+         *
+         *   x = ((y - r)^2)/(2σ^2) - (yplus^2)/(2σ_max^2)
+         *
+         * Note: σ_max is the σ0 from the original Falcon code, and
+         *       fpr_inv_2sqrsigma0 = 1/(2σ_max^2).
          */
         x = fpr_mul(fpr_sqr(fpr_sub(fpr_of(y), r)), dss);
-        x = fpr_sub(x, fpr_mul(
-            fpr_sub(fpr_sqr(fpr_of(y_plus)), fpr_of(y_plus)),
-            fpr_inv_2sqrsigma0));
+        x = fpr_sub(x,
+                    fpr_mul(fpr_of(yplus * yplus), fpr_inv_2sqrsigma0));
 
-        /*
-         * 6. return z ← y + ⌊c⌉ with probability (σ_min/σ)·exp(−x)
-         */
         if (BerExp(&spc->p, x, ccs)) {
+            /*
+             * NewSamplerZ is centered on r, but the actual center is
+             * mu = s + r, so we return s + y as the final sample.
+             */
             return s + y;
         }
     }
 }
 
-// /* see inner.h */
-// void
-// Zf(sign_tree)(int16_t *sig, inner_shake256_context *rng,
-// 	const fpr *restrict expanded_key,
-// 	const uint16_t *hm, unsigned logn, uint8_t *tmp)
-// {
-// 	fpr *ftmp;
-
-// 	ftmp = (fpr *)tmp;
-// 	for (;;) {
-// 		/*
-// 		 * Signature produces short vectors s1 and s2. The
-// 		 * signature is acceptable only if the aggregate vector
-// 		 * s1,s2 is short; we must use the same bound as the
-// 		 * verifier.
-// 		 *
-// 		 * If the signature is acceptable, then we return only s2
-// 		 * (the verifier recomputes s1 from s2, the hashed message,
-// 		 * and the public key).
-// 		 */
-// 		sampler_context spc;
-// 		samplerZ samp;
-// 		void *samp_ctx;
-
-// 		/*
-// 		 * Normal sampling. We use a fast PRNG seeded from our
-// 		 * SHAKE context ('rng').
-// 		 */
-// 		spc.sigma_min = fpr_sigma_min[logn];
-// 		Zf(prng_init)(&spc.p, rng);
-// 		samp = Zf(sampler);
-// 		samp_ctx = &spc;
-
-// 		/*
-// 		 * Do the actual signature.
-// 		 */
-// 		if (do_sign_tree(samp, samp_ctx, sig,
-// 			expanded_key, hm, logn, ftmp))
-// 		{
-// 			break;
-// 		}
-// 	}
-// }
-
-// /* see inner.h */
-// void
-// Zf(sign_dyn)(int16_t *sig, inner_shake256_context *rng,
-// 	const int8_t *restrict f, const int8_t *restrict g,
-// 	const int8_t *restrict F, const int8_t *restrict G,
-// 	const uint16_t *hm, unsigned logn, uint8_t *tmp)
-// {
-// 	fpr *ftmp;
-
-// 	ftmp = (fpr *)tmp;
-// 	for (;;) {
-// 		/*
-// 		 * Signature produces short vectors s1 and s2. The
-// 		 * signature is acceptable only if the aggregate vector
-// 		 * s1,s2 is short; we must use the same bound as the
-// 		 * verifier.
-// 		 *
-// 		 * If the signature is acceptable, then we return only s2
-// 		 * (the verifier recomputes s1 from s2, the hashed message,
-// 		 * and the public key).
-// 		 */
-// 		sampler_context spc;
-// 		samplerZ samp;
-// 		void *samp_ctx;
-
-// 		/*
-// 		 * Normal sampling. We use a fast PRNG seeded from our
-// 		 * SHAKE context ('rng').
-// 		 */
-// 		spc.sigma_min = fpr_sigma_min[logn];
-// 		Zf(prng_init)(&spc.p, rng);
-// 		samp = Zf(sampler);
-// 		samp_ctx = &spc;
-
-// 		/*
-// 		 * Do the actual signature.
-// 		 */
-// 		if (do_sign_dyn(samp, samp_ctx, sig,
-// 			f, g, F, G, hm, logn, ftmp))
-// 		{
-// 			break;
-// 		}
-// 	}
-// }
 
 /* see inner.h */
 void
@@ -1637,7 +1595,8 @@ Zf(sign_tree)(int16_t *sig, inner_shake256_context *rng,
 		 */
 		spc.sigma_min = fpr_sigma_min[logn];
 		Zf(prng_init)(&spc.p, rng);
-		samp = Zf(sampler);
+		//samp = Zf(sampler);
+		samp = Zf(new_sampler);
 		samp_ctx = &spc;
 
 		/*
@@ -1682,7 +1641,8 @@ Zf(sign_dyn)(int16_t *sig, inner_shake256_context *rng,
 		 */
 		spc.sigma_min = fpr_sigma_min[logn];
 		Zf(prng_init)(&spc.p, rng);
-		samp = Zf(sampler);
+		//samp = Zf(sampler);
+		samp = Zf(new_sampler);
 		samp_ctx = &spc;
 
 		/*
