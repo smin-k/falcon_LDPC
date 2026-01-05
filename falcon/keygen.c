@@ -623,6 +623,36 @@ static const small_prime PRIMES[] = {
 	{ 0, 0, 0 }
 };
 
+#define LIMB_MASK   0x7FFFFFFF
+
+static uint32_t
+z31_add(uint32_t *d, const uint32_t *a, const uint32_t *b, size_t len)
+{
+    uint32_t cc = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint64_t w = (uint64_t)(a[i] & LIMB_MASK) + (uint64_t)(b[i] & LIMB_MASK) + cc;
+        d[i] = (uint32_t)(w & LIMB_MASK);
+        cc = (uint32_t)(w >> 31);
+    }
+    return cc; /* 1이면 overflow */
+}
+
+/* d = a - b, (가정: a >= b). underflow면 1 리턴 */
+static uint32_t
+z31_sub(uint32_t *d, const uint32_t *a, const uint32_t *b, size_t len)
+{
+    uint32_t cc = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint32_t aw = a[i] & LIMB_MASK;
+        uint32_t bw = b[i] & LIMB_MASK;
+        uint32_t w  = aw - bw - cc;
+        d[i] = w & LIMB_MASK;
+        /* borrow 발생 조건 */
+        cc = (aw < (bw + cc));
+    }
+    return cc;
+}
+
 /*
  * Reduce a small signed integer modulo a small prime. The source
  * value x MUST be such that -p < x < p.
@@ -2758,9 +2788,90 @@ solve_NTRU_deepest(unsigned logn_top,
 	 * imply failure of the NTRU solving equation, and the (f,g)
 	 * values will be abandoned in that case.
 	 */
-	if (!zint_bezout(Gp, Fp, fp, gp, len, t1)) {
+	// if (!zint_bezout(Gp, Fp, fp, gp, len, t1)) {
+	// 	return 0;
+	// }
+
+	uint32_t px = fp[0] & 1;
+	uint32_t py = gp[0] & 1;
+
+	/* 둘 다 even이면 gcd가 odd(=1)일 수 없어서 NTRU 해가 사실상 불가 → reject */
+	if ((px | py) == 0) {
 		return 0;
 	}
+
+	if (px && py) {
+		/* 기존 케이스: odd-odd */
+		if (!zint_bezout(Gp, Fp, fp, gp, len, t1)) {
+			return 0;
+		}
+	} else if (px && !py) {
+		/* x odd, y even: y' = y + x 로 odd화 */
+		uint32_t *yp = t1;          /* len */
+		uint32_t *tb = yp + len;    /* zint_bezout workspace */
+
+		if (z31_add(yp, gp, fp, len) != 0) {
+			return 0; /* overflow -> reject */
+		}
+		if (!zint_bezout(Gp, Fp, fp, yp, len, tb)) {
+			return 0;
+		}
+
+		/*
+		* 변환:
+		* x*u - (y+x)*v = 1
+		* => x*(u - v) - y*v = 1
+		*
+		* u' = u - v 는 음수 가능.
+		* 안전하게 k=1을 써서:
+		* u'' = (u - v) + y
+		* v'' = v + x
+		* 그러면 x*u'' - y*v'' = 1 그대로 유지.
+		*
+		* 즉:
+		* Gp = u'' = (Gp + gp) - Fp
+		* Fp = v'' = Fp + fp
+		*/
+		uint32_t *tmpU = yp; /* 재사용: yp에 U 임시 저장 */
+		if (z31_add(tmpU, Gp, gp, len) != 0) return 0;
+		if (z31_sub(tmpU, tmpU, Fp, len) != 0) return 0;
+		if (z31_add(Fp, Fp, fp, len) != 0) return 0;
+
+		/* Gp <- tmpU */
+		for (size_t i = 0; i < len; i++) Gp[i] = tmpU[i];
+
+	} else {
+		/* x even, y odd: x' = x + y 로 odd화 */
+		uint32_t *xp = t1;          /* len */
+		uint32_t *tb = xp + len;    /* zint_bezout workspace */
+
+		if (z31_add(xp, fp, gp, len) != 0) {
+			return 0;
+		}
+		if (!zint_bezout(Gp, Fp, xp, gp, len, tb)) {
+			return 0;
+		}
+
+		/*
+		* (x+y)*u - y*v = 1
+		* => x*u - y*(v - u) = 1
+		* V = (v - u) 가 음수 가능 → k=1 사용:
+		* U'' = u + y
+		* V'' = (v - u) + x
+		* 그러면 x*U'' - y*V'' = 1 유지.
+		*
+		* 즉:
+		* Gp = U'' = Gp + gp
+		* Fp = V'' = (Fp + fp) - Gp_old
+		*/
+		uint32_t *tmpU = xp; /* 재사용: xp에 U_old 백업 */
+		for (size_t i = 0; i < len; i++) tmpU[i] = Gp[i]; /* u_old */
+
+		if (z31_add(Gp, Gp, gp, len) != 0) return 0;      /* u_old + y */
+		if (z31_add(Fp, Fp, fp, len) != 0) return 0;      /* v + x */
+		if (z31_sub(Fp, Fp, tmpU, len) != 0) return 0;    /* (v+x) - u_old */
+	}
+
 
 	/*
 	 * Multiply the two values by the target value q. Values must
@@ -4363,22 +4474,23 @@ Zf(new_keygen)(inner_shake256_context *rng,
 	unsigned logn, uint8_t *tmp)
 {
 	/*
-	 * New key generation variant:
+	 * Algorithm is the following:
 	 *
-	 *  - Same structure as Zf(keygen), but:
-	 *    * f, g are sampled with controlled parity using
-	 *      poly_small_mkgauss_choose():
-	 *        sum(f) ≡ 0 (mod 2)
-	 *        sum(g) ≡ 1 (mod 2)
-	 *      so that ||(g,-f)||^2 has odd parity.
-	 *    * We additionally enforce that the squared norm
-	 *      t = ||(g,-f)||^2 is odd.
+	 *  - Generate f and g with the Gaussian distribution.
 	 *
-	 *  - This follows the countermeasure from the
-	 *    "Remedying the floating-point error sensitivity"
-	 *    paper: avoid half-integer centers by ensuring
-	 *    that t is odd, so that the small denominators m1,
-	 *    m2, m3 are all odd.
+	 *  - If either Res(f,phi) or Res(g,phi) is even, try again.
+	 *
+	 *  - If ||(f,g)|| is too large, try again.
+	 *
+	 *  - If ||B~_{f,g}|| is too large, try again.
+	 *
+	 *  - If f is not invertible mod phi mod q, try again.
+	 *
+	 *  - Compute h = g/f mod phi mod q.
+	 *
+	 *  - Solve the NTRU equation fG - gF = q; if the solving fails,
+	 *    try again. Usual failure condition is when Res(f,phi)
+	 *    and Res(g,phi) are not prime to each other.
 	 */
 	size_t n, u;
 	uint16_t *h2, *tmp2;
@@ -4396,8 +4508,23 @@ Zf(new_keygen)(inner_shake256_context *rng,
 #endif  // yyyKG_CHACHA20-
 
 	/*
-	 * Same outer loop as original keygen: we keep sampling
-	 * until all constraints are satisfied.
+	 * We need to generate f and g randomly, until we find values
+	 * such that the norm of (g,-f), and of the orthogonalized
+	 * vector, are satisfying. The orthogonalized vector is:
+	 *   (q*adj(f)/(f*adj(f)+g*adj(g)), q*adj(g)/(f*adj(f)+g*adj(g)))
+	 * (it is actually the (N+1)-th row of the Gram-Schmidt basis).
+	 *
+	 * In the binary case, coefficients of f and g are generated
+	 * independently of each other, with a discrete Gaussian
+	 * distribution of standard deviation 1.17*sqrt(q/(2*N)). Then,
+	 * the two vectors have expected norm 1.17*sqrt(q), which is
+	 * also our acceptance bound: we require both vectors to be no
+	 * larger than that (this will be satisfied about 1/4th of the
+	 * time, thus we expect sampling new (f,g) about 4 times for that
+	 * step).
+	 *
+	 * We require that Res(f,phi) and Res(g,phi) are both odd (the
+	 * NTRU equation solver requires it).
 	 */
 	for (;;) {
 		fpr *rt1, *rt2, *rt3;
@@ -4406,35 +4533,25 @@ Zf(new_keygen)(inner_shake256_context *rng,
 		int lim;
 
 		/*
-		 * SAMPLE (f, g) WITH CONTROLLED PARITY
-		 *
-		 * We use poly_small_mkgauss_choose(rc, poly, logn, parity)
-		 * which ensures:
-		 *   sum(poly) ≡ parity (mod 2).
-		 *
-		 * Here we enforce:
-		 *   sum(f) ≡ 0 (mod 2)
-		 *   sum(g) ≡ 1 (mod 2)
-		 *
-		 * Thus sum(f) and sum(g) have opposite parity, and as
-		 * shown in the paper, the squared norm t = ||(g,-f)||^2
-		 * then has odd parity. This replaces the original
-		 * "both sums ≡ 1 (mod 2)" condition.
-		 *
-		 * NOTE:
-		 *   The NTRU solver only needs that Res(f,phi) and Res(g,phi)
-		 *   are not both even; at least one odd is enough. This
-		 *   construction guarantees that.
+		 * The poly_small_mkgauss() function makes sure
+		 * that the sum of coefficients is 1 modulo 2
+		 * (i.e. the resultant of the polynomial with phi
+		 * will be odd).
 		 */
-        /* 랜덤 비트 하나 뽑아서 어느 쪽을 odd로 할지 결정 */
-        uint8_t b;
-        inner_shake256_extract(rc, &b, 1);
-        int pf = b & 1;       /* 0 또는 1 */
-        int pg = pf ^ 1;      /* 서로 반대 parity */
+		        /* 랜덤 비트 하나 뽑아서 어느 쪽을 odd로 할지 결정 */
+		uint8_t bb;
+		inner_shake256_extract(rc, &bb, 1);   // 또는 shake256_extract(...)
+		int pf = bb & 1;
+		int pg = pf ^ 1;
+
+		// int pf = 0;
+		// int pg = 1;
 
         poly_small_mkgauss_choose(rc, f, logn, pf);
         poly_small_mkgauss_choose(rc, g, logn, pg);
 
+		// poly_small_mkgauss(rc, f, logn);
+		// poly_small_mkgauss(rc, g, logn);
 
 		/*
 		 * Verify that all coefficients are within the bounds
@@ -4474,25 +4591,7 @@ Zf(new_keygen)(inner_shake256_context *rng,
 		}
 
 		/*
-		 * EXTRA CONDITION: enforce odd squared norm t.
-		 *
-		 * As discussed in the paper, the parity of
-		 *   t = ||(g,-f)||^2
-		 * is the parity of sum(f) + sum(g). Since we already
-		 * forced sum(f) and sum(g) to have opposite parity,
-		 * t should be odd with overwhelming probability.
-		 *
-		 * For safety and clarity, we explicitly enforce
-		 * that t is odd here; if it is even, we resample.
-		 */
-		if ((norm & 1u) == 0u) {
-			/* t is even → reject and resample */
-			continue;
-		}
-
-		/*
 		 * We compute the orthogonalized vector norm.
-		 * (Same as original keygen.)
 		 */
 		rt1 = (fpr *)tmp;
 		rt2 = rt1 + n;
@@ -4536,7 +4635,6 @@ Zf(new_keygen)(inner_shake256_context *rng,
 
 		/*
 		 * Solve the NTRU equation to get F and G.
-		 * (Same as original keygen.)
 		 */
 		lim = (1 << (Zf(max_FG_bits)[logn] - 1)) - 1;
 		if (!solve_NTRU(logn, F, G, f, g, lim, (uint32_t *)tmp)) {
@@ -4549,3 +4647,4 @@ Zf(new_keygen)(inner_shake256_context *rng,
 		break;
 	}
 }
+

@@ -2,6 +2,7 @@ package vct
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"falcon_vct/falcon"
 	"fmt"
@@ -31,6 +32,31 @@ type Nodes struct {
     VCT_res  bool
     vrfy_res string
     exe_time string
+}
+
+func Prove(PublicKey, PrivateKey, m []byte) (pi, hash []byte, err error) {
+    // 1. 서명 생성 (에러는 무시하지 말자)
+    sig, err := sk.SignCompressed(m)
+    if err != nil {
+        return nil, nil, err
+    }
+
+    // 2. 서명에 SHA-256 적용해서 "압축" (32바이트 해시)
+    sum := sha256.Sum256(sig) // [32]byte
+
+    // 3. pi = 서명, hash = 서명 해시
+    return sig, sum[:], nil
+}
+
+// Verify: pi가 유효한지 확인
+func Verify(PublicKey, PrivateKey, pi []byte) (bool, error) {
+    // pi = 서명 (compressed signature)
+    if err := pk.Verify(pi, m); err != nil {
+        // 검증 실패
+        return false, err
+    }
+    // 검증 성공
+    return true, nil
 }
 
 // 내부 공용 함수: seed가 nil이면 랜덤, 아니면 주어진 seed 사용
@@ -86,24 +112,6 @@ func performFalconVCT(id int, msg []byte, nthreshold uint32, seed []byte) Nodes 
         exe_time: elapsedTime.String(),
     }
 }
-
-func Prove(pk []byte, sk []byte, m []byte) (pi, hash []byte, err error) {
-
-    sig, _ := sk.SignCompressed(m)
-
-    
-
-    return sig, Hash(sig), nil
-}
-
-// Hash: pi에서 VRF output만 추출
-func Hash(pi []byte) []byte {
-	return pi[1 : N2+1] // 첫 바이트는 sign
-}
-
-// Verify: pi가 유효한지 확인
-func Verify(pk []byte, pi []byte, m []byte) (bool, error) {
-
 
 
 // 기존 공개 함수는 그대로 두고, 내부 공용 함수만 호출
